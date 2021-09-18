@@ -1,4 +1,4 @@
-use block_modes::block_padding::ZeroPadding;
+use block_modes::block_padding::{Padding, ZeroPadding};
 use block_modes::{BlockMode, Cbc, Ecb};
 use byteorder::{LittleEndian, ReadBytesExt};
 use field::PwsafeHeaderField;
@@ -10,10 +10,9 @@ use std::cmp::min;
 use std::fmt;
 use std::io;
 use std::io::{Cursor, Read};
+use twofish::cipher::consts::U16;
 use twofish::cipher::generic_array::GenericArray;
 use twofish::Twofish;
-use twofish::cipher::BlockCipher;
-use twofish::cipher::Block;
 
 /// A specialized `Result` type for Password Safe database reader.
 pub type Result<T> = ::std::result::Result<T, Error>;
@@ -27,6 +26,8 @@ pub enum Error {
     InvalidPassword,
     /// Invalid header (mandatory version field is missing or has wrong length).
     InvalidHeader,
+    /// Invalid key for block cipher
+    InvalidCipherKey,
     /// An I/O error.
     IoError(io::Error),
     /// HMAC error.
@@ -39,6 +40,7 @@ impl fmt::Display for Error {
             Error::InvalidTag => write!(f, "Not a Password Safe database file"),
             Error::InvalidPassword => write!(f, "Invalid password"),
             Error::InvalidHeader => write!(f, "Invalid header"),
+            Error::InvalidCipherKey => write!(f, "Invalid block cipher key"),
             Error::IoError(ref e) => e.fmt(f),
             Error::MacError(ref e) => e.fmt(f),
         }
@@ -161,10 +163,21 @@ impl<R: Read> PwsafeReader<R> {
             return Ok(None);
         }
 
-        //self.cipher.decrypt(&mut block).unwrap();
-        let bs = Twofish::
-        let buf = P::pad(buffer, pos, bs).map_err(|_| BlockModeError)?;
-        self.encrypt_blocks(to_blocks(buf));
+        // NOTE this is a copy of block_modes's BlockMode::decrypt function
+        //      BlockMode::decrypt requires "self mut" which we cannot provide
+        //      https://github.com/RustCrypto/block-ciphers/blob/9fceb078cd7c/block-modes/src/traits.rs#L69-L74
+        //      recognize that bs equals 16 and to_blocks was rewritten in safe rust
+        let decrypt = |cipher: &mut TwofishCbc, blk: &[u8]| -> Result<()> {
+            let arr = GenericArray::<u8, U16>::clone_from_slice(blk);
+            cipher.decrypt_blocks(&mut [arr]);
+            if ZeroPadding::unpad(blk).is_err() {
+                Ok(())
+            } else {
+                Err(Error::InvalidCipherKey)
+            }
+        };
+
+        decrypt(&mut self.cipher, &block)?;
 
         let mut cursor = Cursor::new(block);
         let field_length = cursor.read_u32::<LittleEndian>().unwrap() as usize;
@@ -178,7 +191,7 @@ impl<R: Read> PwsafeReader<R> {
         let mut i = 11;
         while i < field_length {
             self.inner.read_exact(&mut block)?;
-            self.cipher.decrypt(&mut block).unwrap();
+            decrypt(&mut self.cipher, &block)?;
             data.extend_from_slice(&block[0..min(16, field_length - i)]);
             i += 16;
         }

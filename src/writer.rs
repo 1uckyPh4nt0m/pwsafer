@@ -10,7 +10,8 @@ use std::cmp::min;
 use std::io;
 use std::io::{Cursor, Write};
 use std::result::Result;
-use twofish::cipher::generic_array::{GenericArray};
+use twofish::cipher::consts::U16;
+use twofish::cipher::generic_array::GenericArray;
 use twofish::Twofish;
 
 type TwofishEcb = Ecb<Twofish, ZeroPadding>;
@@ -116,7 +117,18 @@ impl<W: Write> PwsafeWriter<W> {
             let vlen = v.len();
             block[0..vlen].copy_from_slice(&v);
             OsRng.fill_bytes(&mut block[vlen..16]); // Pad with random bytes
-            self.cipher.encrypt(&mut block, 0).unwrap();
+
+            // NOTE this is a copy of block_modes's BlockMode::encrypt function
+            //      BlockMode::encrypt requires "self mut" which we cannot provide
+            //      https://github.com/RustCrypto/block-ciphers/blob/9fceb078cd7c/block-modes/src/traits.rs#L58-L61
+            //      recognize that bs equals 16 and to_blocks was rewritten in safe rust
+            //      padding should not be necessary, because we already have 16 elements in a block
+            {
+                let arr: GenericArray::<u8, U16> = GenericArray::<u8, U16>::clone_from_slice(&block);
+                self.cipher.encrypt_blocks(&mut [arr]);
+                block.copy_from_slice(&arr);
+            }
+
             self.inner.write_all(&block)?;
 
             cur = Cursor::new(Vec::new());
