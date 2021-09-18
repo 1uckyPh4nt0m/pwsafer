@@ -170,7 +170,7 @@ impl<R: Read> PwsafeReader<R> {
         let decrypt = |cipher: &mut TwofishCbc, blk: &[u8]| -> Result<()> {
             let arr = GenericArray::<u8, U16>::clone_from_slice(blk);
             cipher.decrypt_blocks(&mut [arr]);
-            if ZeroPadding::unpad(blk).is_err() {
+            if ZeroPadding::unpad(blk).is_ok() {
                 Ok(())
             } else {
                 Err(Error::InvalidCipherKey)
