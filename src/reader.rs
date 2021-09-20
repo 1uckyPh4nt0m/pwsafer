@@ -85,7 +85,7 @@ pub struct PwsafeReader<R> {
 }
 
 impl<R: Read> PwsafeReader<R> {
-    /// Creates a new `PwsafeReader` with the given password.
+    /// Creates a new `PwsafeReader` with the given password and reads ps3db data into buffer.
     pub fn new(mut inner: R, password: &[u8]) -> Result<Self> {
         let mut tag = [0; 4];
         if inner.read_exact(&mut tag).is_err() {
@@ -117,25 +117,19 @@ impl<R: Read> PwsafeReader<R> {
             return Err(Error::InvalidPassword);
         }
         
-        //let mut ecb_cipher = TwofishEcb::new_varkey(&key).unwrap();
         let twofish_cipher = Twofish::new_from_slice(&key).unwrap();
         let mut ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
-        //ecb_cipher.decrypt_nopad(&mut k).unwrap();
         ecb_cipher.decrypt(&mut k).unwrap();
         ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
-        //ecb_cipher.decrypt_nopad(&mut l).unwrap();
         ecb_cipher.decrypt(&mut l).unwrap();
 
-        //let iv = GenericArray::from_slice(&iv);
-        //let cbc_cipher = TwofishCbc::new_varkey(&k, &iv).unwrap();
         let cbc_cipher = TwofishCbc::new_from_slices(&k, &iv).unwrap();
 
-        //let hmac = HmacSha256::new_varkey(&l).unwrap();
         let hmac = HmacSha256::new_from_slice(&l).unwrap();
 
         let mut buffer = Vec::new();
         inner.read_to_end(&mut buffer).unwrap();
-        let mut eof_hmac = buffer[buffer.len()-48..buffer.len()].to_vec();   //32 because of pws3eof and hmac
+        let mut eof_hmac = buffer[buffer.len()-48..buffer.len()].to_vec();   //48 because of pws3eof and hmac
         buffer = buffer[0..buffer.len()-48].to_vec();
         cbc_cipher.decrypt(&mut buffer).unwrap();
         buffer.append(&mut eof_hmac);

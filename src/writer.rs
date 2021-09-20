@@ -47,7 +47,6 @@ impl<W: Write> PwsafeWriter<W> {
         inner.write_all(b"PWS3")?;
 
         let mut salt = [0u8; 32];
-        //let mut r = OsRng::new().unwrap();
         OsRng.fill_bytes(&mut salt);
         inner.write_all(&salt)?;
         inner.write_u32::<LittleEndian>(iter)?;
@@ -65,17 +64,13 @@ impl<W: Write> PwsafeWriter<W> {
         OsRng.fill_bytes(&mut k);
         OsRng.fill_bytes(&mut l);
         OsRng.fill_bytes(&mut iv);
-        //let iv = GenericArray::from_slice(&iv);
 
         let mut k_ = k.clone();
         let mut l_ = l.clone();
         let iv_ = iv.clone();
 
-        //let cbc_cipher = TwofishCbc::new_varkey(&k, &iv).unwrap();
-        //let sha256_hmac = HmacSha256::new_varkey(&l).unwrap();
         let sha256_hmac = HmacSha256::new_from_slice(&l).unwrap();
 
-        //let mut ecb_cipher = TwofishEcb::new_varkey(&key).unwrap();
         let twofish_cipher = Twofish::new_from_slice(&key).unwrap();
         let mut ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
         ecb_cipher.encrypt(&mut k_, k.len()).unwrap();
@@ -105,7 +100,6 @@ impl<W: Write> PwsafeWriter<W> {
         let mut cur = Cursor::new(Vec::new());
         cur.write_u32::<LittleEndian>(data.len() as u32)?;
         cur.write_u8(field_type)?;
-        //let mut r = OsRng::new().unwrap();
 
         self.hmac.update(&data);
         loop {
@@ -123,19 +117,6 @@ impl<W: Write> PwsafeWriter<W> {
             block[0..vlen].copy_from_slice(&v);
             OsRng.fill_bytes(&mut block[vlen..16]); // Pad with random bytes
 
-            // // NOTE this is a copy of block_modes's BlockMode::encrypt function
-            // //      BlockMode::encrypt requires "self mut" which we cannot provide
-            // //      https://github.com/RustCrypto/block-ciphers/blob/9fceb078cd7c/block-modes/src/traits.rs#L58-L61
-            // //      recognize that bs equals 16 and to_blocks was rewritten in safe rust
-            // //      padding should not be necessary, because we already have 16 elements in a block
-            // {
-            //     let arr: GenericArray::<u8, U16> = GenericArray::<u8, U16>::clone_from_slice(&block);
-            //     self.cipher.encrypt_blocks(&mut [arr]);
-            //     block.copy_from_slice(&arr);
-            // }
-
-
-            //self.inner.write_all(&block)?;
             self.buffer.append(&mut block.to_vec());
 
             cur = Cursor::new(Vec::new());
