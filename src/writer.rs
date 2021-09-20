@@ -1,20 +1,16 @@
 use block_modes::block_padding::ZeroPadding;
+use block_modes::cipher::NewBlockCipher;
 use block_modes::{BlockMode, Cbc, Ecb};
 use byteorder::{LittleEndian, WriteBytesExt};
 use hmac::{Hmac, Mac, NewMac};
 use key::hash_password;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use std::cmp::min;
-use std::io;
-use std::io::{Cursor, Write};
+use std::io::{self, Cursor, Write};
 use std::result::Result;
-use twofish::cipher::consts::U16;
-use twofish::cipher::generic_array::GenericArray;
-use twofish::Twofish;
+use twofish::{Twofish, cipher::generic_array::GenericArray};
 
-type TwofishEcb = Ecb<Twofish, ZeroPadding>;
 type TwofishCbc = Cbc<Twofish, ZeroPadding>;
 type HmacSha256 = Hmac<Sha256>;
 
@@ -39,7 +35,9 @@ type HmacSha256 = Hmac<Sha256>;
 /// ```
 pub struct PwsafeWriter<W> {
     inner: W,
-    cipher: TwofishCbc,
+    buffer: Vec<u8>,
+    k: [u8; 32],
+    iv: [u8; 16],
     hmac: HmacSha256,
 }
 
@@ -50,7 +48,6 @@ impl<W: Write> PwsafeWriter<W> {
 
         let mut salt = [0u8; 32];
         //let mut r = OsRng::new().unwrap();
-        
         OsRng.fill_bytes(&mut salt);
         inner.write_all(&salt)?;
         inner.write_u32::<LittleEndian>(iter)?;
@@ -70,30 +67,38 @@ impl<W: Write> PwsafeWriter<W> {
         OsRng.fill_bytes(&mut iv);
         //let iv = GenericArray::from_slice(&iv);
 
+        let mut k_ = k.clone();
+        let mut l_ = l.clone();
+        let iv_ = iv.clone();
+
         //let cbc_cipher = TwofishCbc::new_varkey(&k, &iv).unwrap();
-        let cbc_cipher = TwofishCbc::new_from_slices(&k, &iv).unwrap();
         //let sha256_hmac = HmacSha256::new_varkey(&l).unwrap();
         let sha256_hmac = HmacSha256::new_from_slice(&l).unwrap();
 
         //let mut ecb_cipher = TwofishEcb::new_varkey(&key).unwrap();
-        let mut ecb_cipher = TwofishEcb::new_fix(&key, &GenericArray::default());
-        ecb_cipher.encrypt(&mut k, 0).unwrap();
-        ecb_cipher = TwofishEcb::new_fix(&key, &GenericArray::default());
-        ecb_cipher.encrypt(&mut l, 0).unwrap();
+        let twofish_cipher = Twofish::new_from_slice(&key).unwrap();
+        let mut ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
+        ecb_cipher.encrypt(&mut k_, k.len()).unwrap();
+        ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
+        ecb_cipher.encrypt(&mut l_, l.len()).unwrap();
 
-        inner.write_all(&k)?;
-        inner.write_all(&l)?;
-        inner.write_all(&iv)?;
+        inner.write_all(&k_)?;
+        inner.write_all(&l_)?;
+        inner.write_all(&iv_)?;
+
+        let buffer = Vec::new();
 
         let w = PwsafeWriter {
             inner,
-            cipher: cbc_cipher,
+            buffer,
+            k,
+            iv,
             hmac: sha256_hmac,
         };
         Ok(w)
     }
 
-    /// Encrypts and writes one field.
+    /// Prepares one field.
     pub fn write_field(&mut self, field_type: u8, data: &[u8]) -> Result<(), io::Error> {
         let mut i: usize = 0;
         let mut block = [0u8; 16];
@@ -118,18 +123,20 @@ impl<W: Write> PwsafeWriter<W> {
             block[0..vlen].copy_from_slice(&v);
             OsRng.fill_bytes(&mut block[vlen..16]); // Pad with random bytes
 
-            // NOTE this is a copy of block_modes's BlockMode::encrypt function
-            //      BlockMode::encrypt requires "self mut" which we cannot provide
-            //      https://github.com/RustCrypto/block-ciphers/blob/9fceb078cd7c/block-modes/src/traits.rs#L58-L61
-            //      recognize that bs equals 16 and to_blocks was rewritten in safe rust
-            //      padding should not be necessary, because we already have 16 elements in a block
-            {
-                let arr: GenericArray::<u8, U16> = GenericArray::<u8, U16>::clone_from_slice(&block);
-                self.cipher.encrypt_blocks(&mut [arr]);
-                block.copy_from_slice(&arr);
-            }
+            // // NOTE this is a copy of block_modes's BlockMode::encrypt function
+            // //      BlockMode::encrypt requires "self mut" which we cannot provide
+            // //      https://github.com/RustCrypto/block-ciphers/blob/9fceb078cd7c/block-modes/src/traits.rs#L58-L61
+            // //      recognize that bs equals 16 and to_blocks was rewritten in safe rust
+            // //      padding should not be necessary, because we already have 16 elements in a block
+            // {
+            //     let arr: GenericArray::<u8, U16> = GenericArray::<u8, U16>::clone_from_slice(&block);
+            //     self.cipher.encrypt_blocks(&mut [arr]);
+            //     block.copy_from_slice(&arr);
+            // }
 
-            self.inner.write_all(&block)?;
+
+            //self.inner.write_all(&block)?;
+            self.buffer.append(&mut block.to_vec());
 
             cur = Cursor::new(Vec::new());
             if i >= data.len() {
@@ -139,8 +146,13 @@ impl<W: Write> PwsafeWriter<W> {
         Ok(())
     }
 
-    /// Writes EOF block and HMAC.
+    /// Encrypts/Writes all fields, EOF block and HMAC.
     pub fn finish(&mut self) -> Result<(), io::Error> {
+        let mut fields = self.buffer.clone();
+        let pos = self.buffer.len();
+        let cbc_cipher = TwofishCbc::new_from_slices(&self.k, &self.iv).unwrap();
+        cbc_cipher.encrypt(&mut fields, pos).unwrap();
+        self.inner.write_all(&fields)?;
         self.inner.write_all(b"PWS3-EOFPWS3-EOF")?;
         self.inner.write_all(&self.hmac.clone().finalize().into_bytes())?;
         Ok(())

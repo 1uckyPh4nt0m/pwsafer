@@ -7,8 +7,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 
 fn main() {
-    let rfilename = "pwsafe.psafe3";
-    let wfilename = "pwsafe.new.psafe3";
+    let rfilename = "./tests/pwsafe.psafe3";
+    let wfilename = "./tests/pwsafe.new.psafe3";
 
     let rfile = BufReader::new(File::open(rfilename).unwrap());
     let wfile = BufWriter::new(File::create(wfilename).unwrap());

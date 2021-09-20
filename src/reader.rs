@@ -1,18 +1,15 @@
-use block_modes::block_padding::{Padding, ZeroPadding};
+use block_modes::block_padding::{ZeroPadding};
 use block_modes::{BlockMode, Cbc, Ecb};
+use block_modes::cipher::NewBlockCipher;
 use byteorder::{LittleEndian, ReadBytesExt};
 use field::PwsafeHeaderField;
-use hmac::crypto_mac;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{crypto_mac, Hmac, Mac, NewMac};
 use key::hash_password;
 use sha2::{Digest, Sha256};
 use std::cmp::min;
 use std::fmt;
-use std::io;
-use std::io::{Cursor, Read};
-use twofish::cipher::consts::U16;
-use twofish::cipher::generic_array::GenericArray;
-use twofish::Twofish;
+use std::io::{self, Cursor, Read};
+use twofish::{Twofish, cipher::generic_array::GenericArray};
 
 /// A specialized `Result` type for Password Safe database reader.
 pub type Result<T> = ::std::result::Result<T, Error>;
@@ -59,7 +56,6 @@ impl From<crypto_mac::MacError> for Error {
     }
 }
 
-type TwofishEcb = Ecb<Twofish, ZeroPadding>;
 type TwofishCbc = Cbc<Twofish, ZeroPadding>;
 type HmacSha256 = Hmac<Sha256>;
 
@@ -81,8 +77,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// db.verify().unwrap();
 /// ```
 pub struct PwsafeReader<R> {
-    inner: R,
-    cipher: TwofishCbc,
+    _inner: R,
+    buffer: Cursor<Vec<u8>>,
     hmac: HmacSha256,
     /// Number of iterations
     iter: u32,
@@ -122,9 +118,12 @@ impl<R: Read> PwsafeReader<R> {
         }
         
         //let mut ecb_cipher = TwofishEcb::new_varkey(&key).unwrap();
-        let mut ecb_cipher = TwofishEcb::new_fix(&key, &GenericArray::default());
+        let twofish_cipher = Twofish::new_from_slice(&key).unwrap();
+        let mut ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
+        //ecb_cipher.decrypt_nopad(&mut k).unwrap();
         ecb_cipher.decrypt(&mut k).unwrap();
-        ecb_cipher = TwofishEcb::new_fix(&key, &GenericArray::default());
+        ecb_cipher = Ecb::<&Twofish, ZeroPadding>::new(&twofish_cipher, &GenericArray::default());
+        //ecb_cipher.decrypt_nopad(&mut l).unwrap();
         ecb_cipher.decrypt(&mut l).unwrap();
 
         //let iv = GenericArray::from_slice(&iv);
@@ -134,9 +133,16 @@ impl<R: Read> PwsafeReader<R> {
         //let hmac = HmacSha256::new_varkey(&l).unwrap();
         let hmac = HmacSha256::new_from_slice(&l).unwrap();
 
+        let mut buffer = Vec::new();
+        inner.read_to_end(&mut buffer).unwrap();
+        let mut eof_hmac = buffer[buffer.len()-48..buffer.len()].to_vec();   //32 because of pws3eof and hmac
+        buffer = buffer[0..buffer.len()-48].to_vec();
+        cbc_cipher.decrypt(&mut buffer).unwrap();
+        buffer.append(&mut eof_hmac);
+
         Ok(PwsafeReader {
-            inner,
-            cipher: cbc_cipher,
+            _inner: inner,
+            buffer: Cursor::new(buffer),
             hmac,
             iter,
         })
@@ -157,29 +163,14 @@ impl<R: Read> PwsafeReader<R> {
     /// Returns field type and contents or `None` if EOF block is encountered.
     pub fn read_field(&mut self) -> Result<Option<(u8, Vec<u8>)>> {
         let mut block = [0u8; 16];
-        self.inner.read_exact(&mut block)?;
+        self.buffer.read_exact(&mut block)?;
 
-        if &block == b"PWS3-EOFPWS3-EOF" {
+        let eof = b"PWS3-EOFPWS3-EOF";
+        if &block == eof {
             return Ok(None);
         }
 
-        // NOTE this is a copy of block_modes's BlockMode::decrypt function
-        //      BlockMode::decrypt requires "self mut" which we cannot provide
-        //      https://github.com/RustCrypto/block-ciphers/blob/9fceb078cd7c/block-modes/src/traits.rs#L69-L74
-        //      recognize that bs equals 16 and to_blocks was rewritten in safe rust
-        let decrypt = |cipher: &mut TwofishCbc, blk: &[u8]| -> Result<()> {
-            let arr = GenericArray::<u8, U16>::clone_from_slice(blk);
-            cipher.decrypt_blocks(&mut [arr]);
-            if ZeroPadding::unpad(blk).is_ok() {
-                Ok(())
-            } else {
-                Err(Error::InvalidCipherKey)
-            }
-        };
-
-        decrypt(&mut self.cipher, &block)?;
-
-        let mut cursor = Cursor::new(block);
+        let mut cursor = Cursor::new(&block);
         let field_length = cursor.read_u32::<LittleEndian>().unwrap() as usize;
         let field_type = cursor.read_u8().unwrap();
 
@@ -190,8 +181,7 @@ impl<R: Read> PwsafeReader<R> {
         // Read the rest of the field
         let mut i = 11;
         while i < field_length {
-            self.inner.read_exact(&mut block)?;
-            decrypt(&mut self.cipher, &block)?;
+            self.buffer.read_exact(&mut block)?;
             data.extend_from_slice(&block[0..min(16, field_length - i)]);
             i += 16;
         }
@@ -205,8 +195,8 @@ impl<R: Read> PwsafeReader<R> {
     ///
     /// This function must be called after reading the last field in the database.
     pub fn verify(&mut self) -> Result<()> {
-        let mut mac = [0; 32];
-        self.inner.read_exact(&mut mac)?;
+        let mut mac = [0u8; 32];
+        self.buffer.read_exact(&mut mac)?;
         self.hmac.clone().verify(&mac)?;
         Ok(())
     }
