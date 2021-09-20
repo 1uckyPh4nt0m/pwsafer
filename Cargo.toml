@@ -1,5 +1,5 @@
 [package]
-name = "pwsafe"
+name = "pwsafer"
 version = "0.1.3"
 authors = ["Gabriel Vukovic <gabriel.vukovic@student.tugraz.at>"]
 description = "A library for reading and writing Password Safe databases.\n"
